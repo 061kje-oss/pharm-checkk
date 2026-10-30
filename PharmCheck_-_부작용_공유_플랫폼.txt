@@ -1,0 +1,331 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import { Search, Plus, Pill, AlertTriangle, Activity, X, Clock, ShieldAlert } from 'lucide-react';
+
+// --- Firebase Initialization (Required Boilerplate) ---
+let app, auth, db, appId;
+
+try {
+  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+  app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+  appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+} catch (error) {
+  console.error("Firebase initialization failed:", error);
+}
+
+// Constants
+const CATEGORIES = ['위장관계', '신경계', '피부', '심혈관계', '호흡기계', '전신/기타'];
+const SEVERITY_LEVELS = [
+  { id: '경미함', color: 'bg-green-100 text-green-800 border-green-200' },
+  { id: '중등도', color: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
+  { id: '심각함', color: 'bg-red-100 text-red-800 border-red-200' }
+];
+
+export default function PharmCheckApp() {
+  const [user, setUser] = useState(null);
+  const [experiences, setExperiences] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  // Form State
+  const initialFormState = { drugName: '', dosage: '', category: '위장관계', severity: '경미함', description: '' };
+  const [formData, setFormData] = useState(initialFormState);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  // 1. Auth Setup
+  useEffect(() => {
+    if (!auth) return;
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Data Fetching
+  useEffect(() => {
+    if (!user || !db) return;
+
+    // Strict Path Rule: collection(db, 'artifacts', appId, 'public', 'data', collectionName)
+    const experiencesRef = collection(db, 'artifacts', appId, 'public', 'data', 'drug_experiences');
+    
+    const unsubscribe = onSnapshot(experiencesRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        // Handle server timestamp locally if pending
+        createdAt: doc.data().createdAt?.toDate() || new Date() 
+      }));
+      
+      // Sort in memory (newest first)
+      data.sort((a, b) => b.createdAt - a.createdAt);
+      setExperiences(data);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching experiences:", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 3. Handlers
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormError('');
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.drugName.trim() || !formData.description.trim()) {
+      setFormError('약물 이름과 상세 증상은 필수 입력 항목입니다.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const experiencesRef = collection(db, 'artifacts', appId, 'public', 'data', 'drug_experiences');
+      await addDoc(experiencesRef, {
+        ...formData,
+        userId: user.uid,
+        createdAt: serverTimestamp()
+      });
+      setFormData(initialFormState);
+      setIsModalOpen(false);
+    } catch (error) {
+      console.error("Error adding document: ", error);
+      setFormError('저장 중 오류가 발생했습니다. 다시 시도해주세요.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 4. Derived Data
+  const filteredExperiences = useMemo(() => {
+    return experiences.filter(exp => 
+      exp.drugName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      exp.description.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [experiences, searchQuery]);
+
+  const getSeverityColor = (level) => {
+    return SEVERITY_LEVELS.find(s => s.id === level)?.color || 'bg-gray-100 text-gray-800 border-gray-200';
+  };
+
+  const formatDate = (date) => {
+    return new Intl.DateTimeFormat('ko-KR', {
+      year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    }).format(date);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-blue-600">
+            <ShieldAlert className="w-7 h-7" />
+            <h1 className="text-xl font-bold tracking-tight">PharmCheck <span className="text-sm font-normal text-slate-500 hidden sm:inline-block">| 부작용 경험 공유</span></h1>
+          </div>
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium transition-colors text-sm sm:text-base"
+          >
+            <Plus className="w-4 h-4" />
+            <span className="hidden sm:inline">경험 공유하기</span>
+            <span className="sm:hidden">공유</span>
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+        {/* Search Bar */}
+        <div className="relative mb-8 max-w-2xl mx-auto">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search className="h-5 w-5 text-slate-400" />
+          </div>
+          <input
+            type="text"
+            placeholder="약물 이름이나 증상을 검색해보세요 (예: 타이레놀, 졸음)"
+            className="block w-full pl-10 pr-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow shadow-sm text-base"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+
+        {/* Feed Area */}
+        {loading ? (
+          <div className="flex justify-center py-20 text-slate-500">
+            <Activity className="w-8 h-8 animate-spin" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {filteredExperiences.length === 0 ? (
+              <div className="text-center py-16 bg-white rounded-xl border border-dashed border-slate-300">
+                <Pill className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                <h3 className="text-lg font-medium text-slate-900">검색 결과가 없습니다.</h3>
+                <p className="text-slate-500 mt-1">해당 약물에 대한 첫 번째 경험을 공유해주세요.</p>
+              </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-2">
+                {filteredExperiences.map((exp) => (
+                  <div key={exp.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 hover:shadow-md transition-shadow">
+                    <div className="flex justify-between items-start mb-3">
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                          {exp.drugName}
+                        </h3>
+                        <p className="text-sm text-slate-500 flex items-center gap-1 mt-1">
+                          <Pill className="w-3 h-3" /> 복용량: {exp.dosage || '미기재'}
+                        </p>
+                      </div>
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${getSeverityColor(exp.severity)}`}>
+                        {exp.severity}
+                      </span>
+                    </div>
+                    
+                    <div className="inline-block bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-medium mb-3">
+                      {exp.category}
+                    </div>
+
+                    <p className="text-slate-700 text-sm leading-relaxed mb-4 line-clamp-3">
+                      {exp.description}
+                    </p>
+
+                    <div className="flex items-center text-xs text-slate-400 mt-auto pt-3 border-t border-slate-100">
+                      <Clock className="w-3 h-3 mr-1" />
+                      {formatDate(exp.createdAt)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Share Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-blue-600" /> 부작용 경험 공유하기
+              </h2>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-200 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleSubmit} className="p-6 overflow-y-auto flex-1">
+              {formError && (
+                <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">
+                  {formError}
+                </div>
+              )}
+              
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">약물 이름 *</label>
+                  <input 
+                    type="text" 
+                    name="drugName" 
+                    value={formData.drugName} 
+                    onChange={handleInputChange}
+                    placeholder="예: 타이레놀정 500mg" 
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">복용량 / 빈도</label>
+                  <input 
+                    type="text" 
+                    name="dosage" 
+                    value={formData.dosage} 
+                    onChange={handleInputChange}
+                    placeholder="예: 1일 2회, 1회 1정" 
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">증상 분류</label>
+                    <select 
+                      name="category" 
+                      value={formData.category} 
+                      onChange={handleInputChange}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    >
+                      {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">심각도</label>
+                    <select 
+                      name="severity" 
+                      value={formData.severity} 
+                      onChange={handleInputChange}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    >
+                      {SEVERITY_LEVELS.map(level => <option key={level.id} value={level.id}>{level.id}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">상세 증상 설명 *</label>
+                  <textarea 
+                    name="description" 
+                    value={formData.description} 
+                    onChange={handleInputChange}
+                    rows="4" 
+                    placeholder="겪으신 부작용 증상을 자세히 적어주세요. 언제부터 시작되었고, 어떻게 대처하셨는지 적어주시면 다른 분들께 큰 도움이 됩니다." 
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                  ></textarea>
+                </div>
+              </div>
+              
+              <div className="mt-8 pt-4 border-t border-slate-100 flex justify-end gap-3">
+                <button 
+                  type="button" 
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors"
+                >
+                  취소
+                </button>
+                <button 
+                  type="submit" 
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium transition-colors flex items-center"
+                >
+                  {isSubmitting ? '저장 중...' : '경험 등록하기'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
